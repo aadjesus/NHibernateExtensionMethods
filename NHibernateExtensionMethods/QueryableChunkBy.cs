@@ -2,6 +2,9 @@
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Linq;
+using NHibernate.Util;
+using NHibernate;
+using System.Reflection;
 
 namespace NHibernateExtensionMethods
 {
@@ -10,34 +13,46 @@ namespace NHibernateExtensionMethods
     /// </summary>
     public static class QueryableChunkBy
     {
+        private const int NUMBER_OF_LINES_ORACLE = 999;
+        private const int NUMBER_OF_LINES = 1900;
+
         /// <summary>
         /// Retornar <see cref="IQueryable"/> com clausula 'IN' agrupada por partes conforme a quantidade informada.
         /// </summary>
         /// <param name="queryable"/>
-        /// <param name="propriedade">Propriedade</param>
-        /// <param name="valores">Valores</param>
-        /// <param name="Itens">Quantidade</param>
+        /// <param name="property"/>
+        /// <param name="value"/>
         /// <remarks>
         /// Ex SQL: Select Id, Descricao From Tabela Where (Id In (1,2,3,4...999) or Id In (1000,1001,1002,...1500))
         /// </remarks>
         public static IQueryable<TSource> ChunkBy<TSource, TKey>(
             this IQueryable<TSource> queryable,
-            Expression<Func<TSource, TKey>> propriedade,
-            IEnumerable<TKey> valores,
-            int Itens = 999)
+            Expression<Func<TSource, TKey>> property,
+            IEnumerable<TKey> value)
         {
-            if (!valores?.Any() ?? false)
+            var session = queryable.Provider
+                .GetType()
+                .GetProperty("Session", BindingFlags.NonPublic | BindingFlags.Instance)
+                .GetValue(queryable.Provider, null) as ISession;
+
+            var dialect = (session.SessionFactory as NHibernate.Impl.SessionFactoryImpl).Dialect;
+
+            var itens = dialect.ToString().ToUpper().Contains("ORACLE")
+                ? NUMBER_OF_LINES_ORACLE
+                : NUMBER_OF_LINES;
+
+            if (!value?.Any() ?? false)
                 return queryable;
 
-            if (!(propriedade?.Body is MemberExpression))
+            if (!(property?.Body is MemberExpression))
                 throw new ArgumentException("Parametro 'expression' invalida.");
 
-            var partes = valores
+            var partes = value
                 .Distinct()
                 .Select((s, index) => new
                 {
                     Valor = s,
-                    Parte = index / Itens
+                    Parte = index / itens
                 })
                 .GroupBy(g => g.Parte);
 
@@ -52,29 +67,31 @@ namespace NHibernateExtensionMethods
                         Expression.Constant(item
                             .Select(s => s.Valor)
                             .ToArray()),
-                        propriedade.Body),
-                        propriedade.Parameters));
+                        property.Body),
+                        property.Parameters));
 
-            Expression<Func<TSource, bool>> expressao = null;
-            if (expressoes.Skip(1) is var expressoesDireita && expressoesDireita.Any())
+            Expression<Func<TSource, bool>> expression = null;
+
+
+            if (expressoes.Skip(1) is var expressionRight && expressionRight.Any())
             {
-                var expressaoEsquerda = expressoes
+                var expressionsLeft = expressoes
                     .FirstOrDefault();
 
-                foreach (var item in expressoesDireita)
+                foreach (var item in expressionRight)
                 {
-                    expressao = Expression.Lambda<Func<TSource, bool>>(
+                    expression = Expression.Lambda<Func<TSource, bool>>(
                         Expression.Or(
-                            expressaoEsquerda.Body,
+                            expressionsLeft.Body,
                             item.Body),
-                        expressaoEsquerda.Parameters);
+                        expressionsLeft.Parameters);
 
-                    expressaoEsquerda = expressao;
+                    expressionsLeft = expression;
                 }
             }
 
             var retorno = queryable
-                .Where(expressao ?? expressoes.FirstOrDefault());
+                .Where(expression ?? expressoes.FirstOrDefault());
 
             return retorno;
         }
